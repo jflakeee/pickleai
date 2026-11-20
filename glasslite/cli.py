@@ -28,6 +28,11 @@ def cmd_capture(cfg: Config, store: Store, args) -> None:
         else:
             logging.info("system audio from device #%d", idx)
             threads.append(AudioCapturer(cfg, store, stop, device=idx, label="them"))
+    if args.export_md:
+        from .export import MarkdownExporter
+
+        store.listeners.append(MarkdownExporter(cfg.notes_dir))
+        logging.info("exporting markdown to %s", cfg.notes_dir)
     if args.summarize_every:
         from .autosummary import AutoSummarizer
         from .llm import Assistant
@@ -53,8 +58,20 @@ def main(argv: list[str] | None = None) -> None:
                    help="also record system audio from an auto-detected loopback device")
     c.add_argument("--summarize-every", type=float, default=0, metavar="MIN",
                    help="auto-summarize via Claude API every MIN minutes (needs ANTHROPIC_API_KEY)")
+    c.add_argument("--export-md", action="store_true",
+                   help="also append everything to $GLASSLITE_HOME/notes/YYYY-MM-DD.md")
     sub.add_parser("devices", help="list audio devices")
-    sub.add_parser("mcp", help="run MCP server on stdio (for Claude Code)")
+    sub.add_parser("mcp", help="run MCP server on stdio (optional; needs the [mcp] extra)")
+    q = sub.add_parser("search", help="full-text search over transcripts and summaries")
+    q.add_argument("query")
+    q.add_argument("--limit", type=int, default=20)
+    sh = sub.add_parser("shot", help="print the file path of a screenshot (latest if no id)")
+    sh.add_argument("id", nargs="?", type=int)
+    i = sub.add_parser("install-skill", help="install the Claude Code skill into ~/.claude/skills")
+    i.add_argument("--allow", action="store_true",
+                   help="also allow `glasslite` commands without prompts in ~/.claude/settings.json")
+    n = sub.add_parser("note", help="save a note/summary so it becomes searchable")
+    n.add_argument("text")
     s = sub.add_parser("summarize", help="summarize recent activity via Claude API")
     s.add_argument("--minutes", type=float, default=30)
     s.add_argument("--images", type=int, default=3)
@@ -65,7 +82,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--minutes", type=float, default=30)
     args = p.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(threadName)s %(message)s")
+    # capture logs progress; query commands keep stdout/stderr clean for Claude Code
+    logging.basicConfig(level=logging.INFO if args.cmd == "capture" else logging.WARNING, format="%(asctime)s %(threadName)s %(message)s")
     cfg = Config()
     cfg.ensure_dirs()
 
@@ -82,12 +100,27 @@ def main(argv: list[str] | None = None) -> None:
         idx = find_loopback_device()
         return print(f"\nloopback candidate: {'#' + str(idx) if idx is not None else 'none'}")
 
+    if args.cmd == "install-skill":
+        from .install import install_skill
+
+        return install_skill(allow=args.allow)
+
     store = Store(cfg.db_path)
     if args.cmd == "capture":
         cmd_capture(cfg, store, args)
     elif args.cmd == "recent":
-        for seg in store.recent(args.minutes):
-            print(seg.fmt())
+        segs = store.recent(args.minutes)
+        print("\n".join(s.fmt() for s in segs) or f"(nothing captured in the last {args.minutes:g} min)")
+    elif args.cmd == "search":
+        segs = store.search(args.query, args.limit)
+        print("\n".join(f"#{s.id} {s.fmt()}" for s in segs) or "(no matches)")
+    elif args.cmd == "shot":
+        seg = store.get(args.id) if args.id is not None else store.latest_screen()
+        if not seg or seg.kind != "screen" or not seg.image_path:
+            raise SystemExit("screenshot not found")
+        print(seg.image_path)
+    elif args.cmd == "note":
+        print(f"saved #{store.add('summary', text=args.text)}")
     else:
         from .llm import Assistant
 

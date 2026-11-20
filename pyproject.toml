@@ -1,11 +1,10 @@
 [project]
 name = "glasslite"
 version = "0.1.0"
-description = "Local screen/audio capture -> Whisper -> SQLite, exposed to Claude Code via MCP"
+description = "Local screen/audio capture -> Whisper -> SQLite, queried by Claude Code via CLI/Skill (MCP optional)"
 requires-python = ">=3.10"
 dependencies = [
   "anthropic>=2.11",
-  "mcp>=2.3,<3",
   "mss>=9",
   "pillow>=10",
   "numpy>=1.26",
@@ -13,7 +12,8 @@ dependencies = [
 
 [project.optional-dependencies]
 audio = ["sounddevice>=0.4", "faster-whisper>=1.0"]
-dev = ["pytest>=8"]
+mcp = ["mcp>=2.3,<3"]
+dev = ["pytest>=8", "mcp>=2.3,<3"]
 
 [project.scripts]
 glasslite = "glasslite.cli:main"
@@ -24,3 +24,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["glasslite"]
+
+[tool.setuptools.package-data]
+glasslite = ["skill/SKILL.md"]

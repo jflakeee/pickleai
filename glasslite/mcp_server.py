@@ -2,7 +2,10 @@
 Claude Code itself does the reasoning over what these tools return."""
 from __future__ import annotations
 
-from mcp.server.mcpserver import Image, MCPServer
+try:
+    from mcp.server.mcpserver import Image, MCPServer
+except ImportError as e:  # optional extra
+    raise SystemExit("MCP server needs the optional extra: pip install 'glasslite[mcp]'") from e
 
 from .config import Config
 from .db import Store

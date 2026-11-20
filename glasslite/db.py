@@ -48,13 +48,18 @@ class Store:
         self.conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        self.listeners: list = []  # callables(Segment) run after each insert (e.g. MarkdownExporter)
 
     def add(self, kind: str, text: str = "", image_path: str | None = None, ts: float | None = None) -> int:
+        ts = ts or time.time()
         cur = self.conn.execute(
             "INSERT INTO segments(ts, kind, text, image_path) VALUES (?, ?, ?, ?)",
-            (ts or time.time(), kind, text, image_path),
+            (ts, kind, text, image_path),
         )
-        return int(cur.lastrowid)
+        seg = Segment(int(cur.lastrowid), ts, kind, text, image_path)
+        for fn in self.listeners:
+            fn(seg)
+        return seg.id
 
     def _rows(self, sql: str, args: tuple) -> list[Segment]:
         return [Segment(*r) for r in self.conn.execute(sql, args).fetchall()]

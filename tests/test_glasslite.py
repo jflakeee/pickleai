@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import anyio
@@ -63,6 +64,7 @@ def test_assistant_payload(env):
 
 
 def test_mcp_stdio_end_to_end(env):
+    pytest.importorskip("mcp")
     from mcp import Client, StdioServerParameters
 
     cfg, store = env
@@ -143,3 +145,55 @@ def test_autosummarizer_tick(env):
     store.add("audio", "셋")
     assert auto.tick() == "- 요약"
     assert 9 < calls[0]["minutes"] < 11 and calls[0]["save"] is True
+
+
+def test_cli_query_commands(env, capsys):
+    from glasslite.cli import main
+
+    cfg, store = env
+    store.add("audio", "[them] 계약서는 금요일까지 회신")
+    sid = ScreenCapturer(cfg, store, stop=None).process(Image.new("RGB", (640, 480), "green"))
+
+    main(["search", "계약서"])
+    assert "금요일" in capsys.readouterr().out
+    main(["recent", "--minutes", "5"])
+    assert f"[screenshot #{sid}]" in capsys.readouterr().out
+    main(["shot"])
+    path = capsys.readouterr().out.strip()
+    assert path == store.get(sid).image_path and Path(path).exists()
+    main(["note", "회의 요약: 계약서 금요일 회신"])
+    assert capsys.readouterr().out.startswith("saved #")
+    main(["search", "회의 요약"])
+    assert "(summary)" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        main(["shot", "99999"])
+
+
+def test_markdown_export(env):
+    from glasslite.export import MarkdownExporter
+
+    cfg, store = env
+    exp = MarkdownExporter(cfg.notes_dir)
+    store.listeners.append(exp)
+    store.add("audio", "[me] 배포는 다음 주")
+    store.add("summary", "- 배포 다음 주")
+    files = list(cfg.notes_dir.glob("*.md"))
+    assert len(files) == 1
+    text = files[0].read_text(encoding="utf-8")
+    assert text.startswith("# ") and "[me] 배포는 다음 주" in text and "summary #2" in text
+
+
+def test_install_skill(tmp_path):
+    import json
+
+    from glasslite.install import RULE, install_skill
+
+    home = tmp_path / ".claude"
+    home.mkdir()
+    (home / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(ls *)"]}, "theme": "dark"}))
+    install_skill(home, allow=True)
+    install_skill(home, allow=True)  # idempotent
+    skill = (home / "skills/glasslite/SKILL.md").read_text(encoding="utf-8")
+    assert skill.startswith("---\nname: glasslite")
+    settings = json.loads((home / "settings.json").read_text())
+    assert settings["permissions"]["allow"] == ["Bash(ls *)", RULE] and settings["theme"] == "dark"
