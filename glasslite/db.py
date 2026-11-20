@@ -80,6 +80,9 @@ class Store:
             (phrase, limit),
         )
 
+    def count_since(self, ts: float, kind: str) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM segments WHERE ts >= ? AND kind = ?", (ts, kind)).fetchone()[0]
+
     def get(self, seg_id: int) -> Segment | None:
         rows = self._rows("SELECT id, ts, kind, text, image_path FROM segments WHERE id = ?", (seg_id,))
         return rows[0] if rows else None

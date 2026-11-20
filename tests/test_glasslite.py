@@ -83,3 +83,63 @@ def test_mcp_stdio_end_to_end(env):
             assert "screenshot #" in r.content[0].text
 
     anyio.run(run)
+
+
+def test_find_loopback_device():
+    from glasslite.capture import find_loopback_device
+
+    devs = [
+        {"name": "MacBook Pro Microphone", "max_input_channels": 1},
+        {"name": "BlackHole 2ch", "max_input_channels": 0},  # output side: ignored
+        {"name": "BlackHole 2ch", "max_input_channels": 2},
+    ]
+    assert find_loopback_device(devs) == 2
+    assert find_loopback_device([{"name": "스테레오 믹스(Realtek)", "max_input_channels": 2}]) == 0
+    assert find_loopback_device([{"name": "USB Mic", "max_input_channels": 1}]) is None
+
+
+def test_audio_label_prefix(env, monkeypatch):
+    import threading
+
+    import numpy as np
+
+    from glasslite.capture import AudioCapturer
+
+    cfg, store = env
+    cap = AudioCapturer(cfg, store, threading.Event(), label="them")
+    monkeypatch.setattr(cap, "transcribe", lambda a: "견적 다시 보내주세요")
+    fake_sd = SimpleNamespace(InputStream=None)
+
+    class Stream:
+        def __init__(self, callback, **kw):
+            self.cb = callback
+
+        def __enter__(self):
+            # feed exactly one chunk, then stop
+            self.cb(np.zeros((int(cap.SR * cfg.audio_chunk), 1), dtype="float32"), 0, None, None)
+            threading.Timer(0.3, cap.stop_ev.set).start()
+
+        def __exit__(self, *a):
+            pass
+
+    fake_sd.InputStream = Stream
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    cap.run()
+    assert store.search("견적 다시")[0].text == "[them] 견적 다시 보내주세요"
+
+
+def test_autosummarizer_tick(env):
+    from glasslite.autosummary import AutoSummarizer
+
+    _, store = env
+    calls = []
+    ai = SimpleNamespace(summarize=lambda **kw: calls.append(kw) or "- 요약")
+    auto = AutoSummarizer(ai, store, stop=None, every_min=10, min_segments=2)
+    auto.last -= 600
+    store.add("audio", "하나")
+    assert auto.tick() is None and not calls  # not enough new speech
+    auto.last -= 600
+    store.add("audio", "둘")
+    store.add("audio", "셋")
+    assert auto.tick() == "- 요약"
+    assert 9 < calls[0]["minutes"] < 11 and calls[0]["save"] is True

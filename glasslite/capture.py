@@ -66,34 +66,63 @@ class ScreenCapturer(threading.Thread):
             self.stop_ev.wait(self.cfg.screen_interval)
 
 
-class AudioCapturer(threading.Thread):
-    """Mic (or loopback device) -> fixed-size chunks -> faster-whisper -> Store.
+# Input devices that carry system audio (the other side of a call), by platform.
+LOOPBACK_HINTS = (
+    "blackhole", "soundflower", "loopback",                # macOS
+    "stereo mix", "스테레오 믹스", "what u hear", "cable output", "vb-audio",  # Windows
+    "monitor of", ".monitor",                              # Linux PulseAudio/PipeWire
+)
 
-    System audio (the other side of a call) needs a loopback device:
-    macOS: BlackHole / Windows: WASAPI loopback / Linux: PulseAudio monitor source.
-    Pick it with GLASSLITE_AUDIO_DEVICE (name substring or index; `glasslite devices` lists them).
+
+def find_loopback_device(devices: list[dict] | None = None) -> int | None:
+    """Index of the first input device that looks like a system-audio loopback, else None."""
+    if devices is None:
+        import sounddevice as sd
+
+        devices = list(sd.query_devices())
+    for i, d in enumerate(devices):
+        name = str(d.get("name", "")).lower()
+        if d.get("max_input_channels", 0) > 0 and any(h in name for h in LOOPBACK_HINTS):
+            return i
+    return None
+
+
+class _Whisper:
+    """One faster-whisper model shared by all audio threads (loaded once, calls serialized)."""
+
+    _model = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def transcribe(cls, cfg: Config, audio: np.ndarray) -> str:
+        with cls._lock:
+            if cls._model is None:
+                from faster_whisper import WhisperModel
+
+                cls._model = WhisperModel(cfg.whisper_model, device="auto", compute_type="int8")
+            segments, _ = cls._model.transcribe(
+                audio, language=cfg.whisper_language, vad_filter=True, beam_size=1
+            )
+            return " ".join(s.text.strip() for s in segments).strip()
+
+
+class AudioCapturer(threading.Thread):
+    """Audio input device -> fixed-size chunks -> faster-whisper -> Store.
+
+    Run one for the mic (label "me") and one for a loopback device (label "them")
+    to capture both sides of a call. `glasslite devices` lists devices.
     """
 
     SR = 16_000
 
-    def __init__(self, cfg: Config, store: Store, stop: threading.Event, device: str | int | None = None):
-        super().__init__(daemon=True, name="audio")
-        self.cfg, self.store, self.stop_ev, self.device = cfg, store, stop, device
+    def __init__(self, cfg: Config, store: Store, stop: threading.Event,
+                 device: str | int | None = None, label: str | None = None):
+        super().__init__(daemon=True, name=f"audio-{label or 'mic'}")
+        self.cfg, self.store, self.stop_ev, self.device, self.label = cfg, store, stop, device, label
         self.q: queue.Queue[np.ndarray] = queue.Queue()
-        self._model = None
-
-    def model(self):
-        if self._model is None:
-            from faster_whisper import WhisperModel
-
-            self._model = WhisperModel(self.cfg.whisper_model, device="auto", compute_type="int8")
-        return self._model
 
     def transcribe(self, audio: np.ndarray) -> str:
-        segments, _ = self.model().transcribe(
-            audio, language=self.cfg.whisper_language, vad_filter=True, beam_size=1
-        )
-        return " ".join(s.text.strip() for s in segments).strip()
+        return _Whisper.transcribe(self.cfg, audio)
 
     def run(self) -> None:
         import sounddevice as sd
@@ -124,5 +153,7 @@ class AudioCapturer(threading.Thread):
                     log.exception("transcription failed")
                     continue
                 if text:
+                    if self.label:
+                        text = f"[{self.label}] {text}"
                     sid = self.store.add("audio", text=text, ts=start)
                     log.info("audio #%d: %s", sid, text[:80])
