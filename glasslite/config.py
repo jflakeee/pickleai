@@ -26,6 +26,10 @@ class Config:
         return self.home / "glasslite.db"
 
     @property
+    def notes_dir(self) -> Path:
+        return self.home / "notes"
+
+    @property
     def shots_dir(self) -> Path:
         return self.home / "shots"
 

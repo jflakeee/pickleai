@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import anyio
@@ -63,6 +64,7 @@ def test_assistant_payload(env):
 
 
 def test_mcp_stdio_end_to_end(env):
+    pytest.importorskip("mcp")
     from mcp import Client, StdioServerParameters
 
     cfg, store = env
@@ -83,3 +85,115 @@ def test_mcp_stdio_end_to_end(env):
             assert "screenshot #" in r.content[0].text
 
     anyio.run(run)
+
+
+def test_find_loopback_device():
+    from glasslite.capture import find_loopback_device
+
+    devs = [
+        {"name": "MacBook Pro Microphone", "max_input_channels": 1},
+        {"name": "BlackHole 2ch", "max_input_channels": 0},  # output side: ignored
+        {"name": "BlackHole 2ch", "max_input_channels": 2},
+    ]
+    assert find_loopback_device(devs) == 2
+    assert find_loopback_device([{"name": "스테레오 믹스(Realtek)", "max_input_channels": 2}]) == 0
+    assert find_loopback_device([{"name": "USB Mic", "max_input_channels": 1}]) is None
+
+
+def test_audio_label_prefix(env, monkeypatch):
+    import threading
+
+    import numpy as np
+
+    from glasslite.capture import AudioCapturer
+
+    cfg, store = env
+    cap = AudioCapturer(cfg, store, threading.Event(), label="them")
+    monkeypatch.setattr(cap, "transcribe", lambda a: "견적 다시 보내주세요")
+    fake_sd = SimpleNamespace(InputStream=None)
+
+    class Stream:
+        def __init__(self, callback, **kw):
+            self.cb = callback
+
+        def __enter__(self):
+            # feed exactly one chunk, then stop
+            self.cb(np.zeros((int(cap.SR * cfg.audio_chunk), 1), dtype="float32"), 0, None, None)
+            threading.Timer(0.3, cap.stop_ev.set).start()
+
+        def __exit__(self, *a):
+            pass
+
+    fake_sd.InputStream = Stream
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    cap.run()
+    assert store.search("견적 다시")[0].text == "[them] 견적 다시 보내주세요"
+
+
+def test_autosummarizer_tick(env):
+    from glasslite.autosummary import AutoSummarizer
+
+    _, store = env
+    calls = []
+    ai = SimpleNamespace(summarize=lambda **kw: calls.append(kw) or "- 요약")
+    auto = AutoSummarizer(ai, store, stop=None, every_min=10, min_segments=2)
+    auto.last -= 600
+    store.add("audio", "하나")
+    assert auto.tick() is None and not calls  # not enough new speech
+    auto.last -= 600
+    store.add("audio", "둘")
+    store.add("audio", "셋")
+    assert auto.tick() == "- 요약"
+    assert 9 < calls[0]["minutes"] < 11 and calls[0]["save"] is True
+
+
+def test_cli_query_commands(env, capsys):
+    from glasslite.cli import main
+
+    cfg, store = env
+    store.add("audio", "[them] 계약서는 금요일까지 회신")
+    sid = ScreenCapturer(cfg, store, stop=None).process(Image.new("RGB", (640, 480), "green"))
+
+    main(["search", "계약서"])
+    assert "금요일" in capsys.readouterr().out
+    main(["recent", "--minutes", "5"])
+    assert f"[screenshot #{sid}]" in capsys.readouterr().out
+    main(["shot"])
+    path = capsys.readouterr().out.strip()
+    assert path == store.get(sid).image_path and Path(path).exists()
+    main(["note", "회의 요약: 계약서 금요일 회신"])
+    assert capsys.readouterr().out.startswith("saved #")
+    main(["search", "회의 요약"])
+    assert "(summary)" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        main(["shot", "99999"])
+
+
+def test_markdown_export(env):
+    from glasslite.export import MarkdownExporter
+
+    cfg, store = env
+    exp = MarkdownExporter(cfg.notes_dir)
+    store.listeners.append(exp)
+    store.add("audio", "[me] 배포는 다음 주")
+    store.add("summary", "- 배포 다음 주")
+    files = list(cfg.notes_dir.glob("*.md"))
+    assert len(files) == 1
+    text = files[0].read_text(encoding="utf-8")
+    assert text.startswith("# ") and "[me] 배포는 다음 주" in text and "summary #2" in text
+
+
+def test_install_skill(tmp_path):
+    import json
+
+    from glasslite.install import RULE, install_skill
+
+    home = tmp_path / ".claude"
+    home.mkdir()
+    (home / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(ls *)"]}, "theme": "dark"}))
+    install_skill(home, allow=True)
+    install_skill(home, allow=True)  # idempotent
+    skill = (home / "skills/glasslite/SKILL.md").read_text(encoding="utf-8")
+    assert skill.startswith("---\nname: glasslite")
+    settings = json.loads((home / "settings.json").read_text())
+    assert settings["permissions"]["allow"] == ["Bash(ls *)", RULE] and settings["theme"] == "dark"
